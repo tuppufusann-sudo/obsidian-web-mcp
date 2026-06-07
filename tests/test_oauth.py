@@ -258,3 +258,19 @@ def test_registered_client_empty_redirects_denied(client, monkeypatch):
                     params=_authz_params(cid, "https://evil.example/cb", challenge),
                     follow_redirects=False)
     assert r2.status_code == 400
+
+
+# --- #20: RFC 9728 protected-resource metadata --------------------------------
+
+def test_oauth_protected_resource_metadata(client):
+    r = client.get("/.well-known/oauth-protected-resource")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["resource"]
+    assert isinstance(body["authorization_servers"], list) and body["authorization_servers"]
+    assert body["bearer_methods_supported"] == ["header"]
+
+
+def test_protected_resource_path_is_auth_exempt():
+    from obsidian_vault_mcp.auth import _AUTH_EXEMPT_PATHS
+    assert "/.well-known/oauth-protected-resource" in _AUTH_EXEMPT_PATHS
