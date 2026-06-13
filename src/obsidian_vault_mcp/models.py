@@ -399,3 +399,15 @@ class VaultCanvasAddEdgeInput(BaseModel):
         max_length=500,
     )
     edge: CanvasEdgeInput = Field(..., description="Edge to append; fromNode/toNode must already exist")
+
+
+class VaultDailyNoteAppendInput(BaseModel):
+    """Append content to today's daily note."""
+
+    model_config = ConfigDict(str_strip_whitespace=False, extra="forbid")
+
+    content: str = Field(
+        ...,
+        description="Content to append to today's daily note (the note is created from the template if missing)",
+        max_length=MAX_CONTENT_SIZE,
+    )

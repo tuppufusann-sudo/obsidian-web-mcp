@@ -80,6 +80,11 @@ from .tools.canvas import (
     vault_canvas_add_node as _vault_canvas_add_node,
     vault_canvas_add_edge as _vault_canvas_add_edge,
 )
+from .tools.daily import (
+    vault_daily_note_path as _vault_daily_note_path,
+    vault_daily_note_read as _vault_daily_note_read,
+    vault_daily_note_append as _vault_daily_note_append,
+)
 from .models import (
     VaultReadInput,
     VaultWriteInput,
@@ -95,6 +100,7 @@ from .models import (
     VaultCanvasReadInput,
     VaultCanvasAddNodeInput,
     VaultCanvasAddEdgeInput,
+    VaultDailyNoteAppendInput,
 )
 
 
@@ -285,6 +291,37 @@ def vault_canvas_add_edge(path: str, edge: dict) -> str:
     """Append an edge to a Canvas file."""
     inp = VaultCanvasAddEdgeInput(path=path, edge=edge)
     return _vault_canvas_add_edge(inp.path, inp.edge.model_dump(exclude_none=True, mode="json"))
+
+
+@mcp.tool(
+    name="vault_daily_note_path",
+    description="Return today's daily-note path (server local date), derived from VAULT_DAILY_NOTES_FOLDER and VAULT_DAILY_NOTES_FORMAT. Does not read or create the file.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_daily_note_path() -> str:
+    """Resolve today's daily-note path."""
+    return _vault_daily_note_path()
+
+
+@mcp.tool(
+    name="vault_daily_note_read",
+    description="Read today's daily note. Returns an error payload (does not create the note) when it does not exist.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_daily_note_read() -> str:
+    """Read today's daily note."""
+    return _vault_daily_note_read()
+
+
+@mcp.tool(
+    name="vault_daily_note_append",
+    description="Append content to today's daily note, creating it from VAULT_DAILY_NOTES_TEMPLATE when missing. Token-efficient daily logging without resending the note body.",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+)
+def vault_daily_note_append(content: str) -> str:
+    """Append to today's daily note."""
+    inp = VaultDailyNoteAppendInput(content=content)
+    return _vault_daily_note_append(inp.content)
 
 
 def main():
