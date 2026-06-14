@@ -13,6 +13,15 @@ VAULT_DAILY_NOTES_FOLDER = os.environ.get("VAULT_DAILY_NOTES_FOLDER", "")
 VAULT_DAILY_NOTES_FORMAT = os.environ.get("VAULT_DAILY_NOTES_FORMAT", "%Y-%m-%d").strip() or "%Y-%m-%d"
 VAULT_DAILY_NOTES_TEMPLATE = os.environ.get("VAULT_DAILY_NOTES_TEMPLATE", "")
 
+# HTTP path the MCP transport is mounted at. Defaults to "/" so connectors that
+# POST to the root complete the handshake (#19) -- changing this default would
+# break that, so leave it unless you deliberately host under a path prefix.
+# Setting it (e.g. "/mcp") lets the server live alongside other services on one
+# hostname behind a reverse proxy that cannot rewrite paths (Cloudflare Tunnel).
+# Validated in validate_config(): must be absolute and must not collide with an
+# auth-exempt path, or it would serve the vault on an unauthenticated route.
+VAULT_MCP_PATH = os.environ.get("VAULT_MCP_PATH", "/")
+
 # OAuth 2.0 client credentials (for Claude app integration)
 VAULT_OAUTH_CLIENT_ID = os.environ.get("VAULT_OAUTH_CLIENT_ID", "vault-mcp-client")
 VAULT_OAUTH_CLIENT_SECRET = os.environ.get("VAULT_OAUTH_CLIENT_SECRET", "")
@@ -98,3 +107,59 @@ FRONTMATTER_INDEX_DEBOUNCE = 5.0
 # Rate limiting (requests per minute) -- track in-memory, enforce per-token
 RATE_LIMIT_READ = 100
 RATE_LIMIT_WRITE = 30
+
+
+def _validate_mcp_path(path: str) -> None:
+    """Reject a VAULT_MCP_PATH that is malformed or would expose the vault unauthenticated.
+
+    The MCP transport mounts at exactly this path. The default "/" keeps behaviour
+    byte-identical and is always valid. Any other value must be an absolute, clean
+    path that does NOT land on (or under) an authentication-exempt route -- otherwise
+    the bearer middleware would wave the vault transport through without a token.
+    """
+    if path == "/":
+        return
+    if not path.startswith("/"):
+        raise ValueError(
+            f"VAULT_MCP_PATH must be an absolute path starting with '/': {path!r}"
+        )
+    if path.endswith("/"):
+        raise ValueError(
+            f"VAULT_MCP_PATH must not end with a trailing slash: {path!r}"
+        )
+    if "?" in path or "#" in path or "//" in path:
+        raise ValueError(
+            "VAULT_MCP_PATH must be a clean path with no query string, fragment, "
+            f"or empty segments: {path!r}"
+        )
+    if "%" in path or any(c.isspace() or ord(c) < 0x20 for c in path):
+        raise ValueError(
+            "VAULT_MCP_PATH must not contain percent-encoding, whitespace, or "
+            f"control characters: {path!r}"
+        )
+    if any(seg in (".", "..") for seg in path.strip("/").split("/")):
+        raise ValueError(
+            f"VAULT_MCP_PATH must not contain '.' or '..' path segments: {path!r}"
+        )
+    # Imported lazily: auth imports config, so a top-level import here would cycle.
+    from .auth import _AUTH_EXEMPT_PATHS
+
+    reserved_prefixes = ("/oauth", "/.well-known")
+    collides = path in _AUTH_EXEMPT_PATHS or any(
+        path == prefix or path.startswith(prefix + "/") for prefix in reserved_prefixes
+    )
+    if collides:
+        raise ValueError(
+            f"VAULT_MCP_PATH {path!r} collides with an authentication-exempt route; "
+            "mounting there would serve the vault without auth. Choose a path that is "
+            "not /health and not under /oauth or /.well-known."
+        )
+
+
+def validate_config() -> None:
+    """Validate operator-supplied configuration at startup.
+
+    Called from server.main() before the server is built, so a bad value fails
+    CLOSED with a clear message instead of booting a broken or insecure server.
+    """
+    _validate_mcp_path(VAULT_MCP_PATH)

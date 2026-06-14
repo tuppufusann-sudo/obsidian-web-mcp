@@ -17,6 +17,7 @@ from .config import (
     VAULT_MCP_ALLOWED_HOSTS,
     VAULT_MCP_FORWARDED_ALLOW_IPS,
     VAULT_MCP_HOST,
+    VAULT_MCP_PATH,
     VAULT_MCP_PORT,
     VAULT_MCP_TOKEN,
     VAULT_PATH,
@@ -46,9 +47,10 @@ mcp = FastMCP(
     "obsidian_web_mcp",
     stateless_http=True,
     json_response=True,
-    # Serve MCP at "/" (not the /mcp default) so connectors that POST to the root
-    # complete the handshake instead of 404ing (#19).
-    streamable_http_path="/",
+    # Mount path for the MCP transport. Defaults to "/" (via VAULT_MCP_PATH) so
+    # connectors that POST to the root complete the handshake instead of 404ing
+    # (#19); set VAULT_MCP_PATH to host under a prefix like "/mcp".
+    streamable_http_path=VAULT_MCP_PATH,
     lifespan=lifespan,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -324,6 +326,43 @@ def vault_daily_note_append(content: str) -> str:
     return _vault_daily_note_append(inp.content)
 
 
+def build_app():
+    """Assemble the authenticated Starlette app served to clients.
+
+    MCP transport + OAuth routes + (off-root only) the unauthenticated spec probe
+    at GET/HEAD / + the bearer-auth middleware. Extracted from main() so the exact
+    composition that serves the vault can be exercised end-to-end in tests, rather
+    than only the validation helper.
+    """
+    from starlette.responses import Response
+    from starlette.routing import Route
+
+    from .auth import BearerAuthMiddleware
+    from .oauth import oauth_routes
+
+    app = mcp.streamable_http_app()
+
+    # MCP spec 2025-06-18 probe: GET/HEAD / answers with the protocol version.
+    # Only mount it when MCP is NOT at root -- otherwise the transport owns
+    # GET/HEAD / and this route would shadow it. (auth.py exempts GET/HEAD /
+    # from bearer auth under the same VAULT_MCP_PATH != "/" guard.)
+    if VAULT_MCP_PATH != "/":
+        async def mcp_root_probe(request):
+            return Response(
+                status_code=200,
+                headers={"MCP-Protocol-Version": "2025-06-18"},
+            )
+
+        app.routes.insert(0, Route("/", mcp_root_probe, methods=["GET", "HEAD"]))
+
+    # Mount OAuth routes (these are excluded from bearer auth via the middleware)
+    for route in oauth_routes:
+        app.routes.insert(0, route)
+
+    app.add_middleware(BearerAuthMiddleware)
+    return app
+
+
 def main():
     """Entry point. Run with streamable HTTP transport."""
     logging.basicConfig(
@@ -334,6 +373,14 @@ def main():
 
     if not VAULT_PATH.is_dir():
         logger.error(f"Vault path does not exist: {VAULT_PATH}")
+        sys.exit(1)
+
+    # Validate operator config before serving; fail CLOSED on a bad value.
+    try:
+        from .config import validate_config
+        validate_config()
+    except ValueError as e:
+        logger.error(f"Invalid configuration: {e}")
         sys.exit(1)
 
     if not VAULT_MCP_TOKEN:
@@ -347,16 +394,7 @@ def main():
 
     # Build the Starlette app with auth middleware and OAuth endpoints
     try:
-        from .auth import BearerAuthMiddleware
-        from .oauth import oauth_routes
-
-        app = mcp.streamable_http_app()
-
-        # Mount OAuth routes (these are excluded from bearer auth via the middleware)
-        for route in oauth_routes:
-            app.routes.insert(0, route)
-
-        app.add_middleware(BearerAuthMiddleware)
+        app = build_app()
         logger.info(f"Starting server on {VAULT_MCP_HOST}:{VAULT_MCP_PORT} with bearer auth + OAuth")
     except Exception as e:
         # Fail CLOSED: never fall back to an unauthenticated server.
