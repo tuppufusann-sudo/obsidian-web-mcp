@@ -8,6 +8,10 @@ import atexit
 import json
 import logging
 import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +20,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .config import (
     VAULT_MCP_ALLOWED_HOSTS,
     VAULT_MCP_FORWARDED_ALLOW_IPS,
+    VAULT_MCP_HEARTBEAT_URL,
     VAULT_MCP_HOST,
     VAULT_MCP_PATH,
     VAULT_MCP_PORT,
@@ -28,6 +33,53 @@ logger = logging.getLogger(__name__)
 
 # Global frontmatter index instance
 frontmatter_index = FrontmatterIndex()
+
+
+# Liveness pings don't need the response body; read just enough to complete the
+# request without pulling a large/hostile body into memory.
+_HEARTBEAT_MAX_BYTES = 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects on the heartbeat GET.
+
+    The configured URL is operator-trusted, but a redirect is not -- following one
+    would let a compromised/typo'd monitor bounce the ping to an arbitrary target
+    (incl. another scheme). Returning None makes urllib raise instead of follow.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_heartbeat_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _heartbeat_ping(url: str) -> None:
+    """Send a single liveness GET. Split out from the loop so it is unit-testable.
+
+    Does not follow redirects and reads at most _HEARTBEAT_MAX_BYTES of the body.
+    """
+    with _heartbeat_opener.open(url, timeout=10) as resp:
+        resp.read(_HEARTBEAT_MAX_BYTES)
+
+
+def _heartbeat_forever(url: str, interval: int) -> None:
+    """Ping ``url`` every ``interval`` seconds for the process lifetime.
+
+    Runs in a daemon thread started from main() -- NOT the per-request MCP lifespan,
+    which fires on every request and would spawn a heartbeat per session. Failures
+    are logged and swallowed so a flaky monitor can never take the server down.
+    """
+    # The heartbeat URL is a capability URL (the secret is in the path), so log only
+    # the host + exception type on failure, never the full URL or exception string.
+    host = urllib.parse.urlsplit(url).hostname or "?"
+    while True:
+        try:
+            _heartbeat_ping(url)
+        except Exception as e:
+            logger.warning("Heartbeat ping to %s failed: %s", host, type(e).__name__)
+        time.sleep(interval)
 
 
 @asynccontextmanager
@@ -391,6 +443,24 @@ def main():
     logger.info(f"Starting vault MCP server. Vault: {VAULT_PATH}")
     frontmatter_index.start()
     atexit.register(frontmatter_index.stop)
+
+    # Optional liveness heartbeat. Daemon thread tied to the process (not the
+    # per-request lifespan), started only when configured. Validated here so a bad
+    # URL scheme or interval fails CLOSED instead of booting silently broken.
+    try:
+        from .config import validate_heartbeat
+        heartbeat_interval = validate_heartbeat()
+    except ValueError as e:
+        logger.error(f"Invalid heartbeat configuration: {e}")
+        sys.exit(1)
+    if heartbeat_interval is not None:
+        threading.Thread(
+            target=_heartbeat_forever,
+            args=(VAULT_MCP_HEARTBEAT_URL, heartbeat_interval),
+            daemon=True,
+            name="heartbeat",
+        ).start()
+        logger.info("Heartbeat enabled (interval: %ds)", heartbeat_interval)
 
     # Build the Starlette app with auth middleware and OAuth endpoints
     try:

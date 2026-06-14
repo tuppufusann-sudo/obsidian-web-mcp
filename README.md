@@ -129,6 +129,8 @@ All configuration is via environment variables:
 | `VAULT_DAILY_NOTES_FOLDER` | No | (none) | Folder for the daily-note tools; empty means the vault root |
 | `VAULT_DAILY_NOTES_FORMAT` | No | `%Y-%m-%d` | `strftime` pattern for the daily-note filename |
 | `VAULT_DAILY_NOTES_TEMPLATE` | No | (none) | `strftime` template prepended when a daily note is first created |
+| `VAULT_MCP_HEARTBEAT_URL` | No | (none) | Optional push URL for an uptime monitor (Uptime Kuma, Healthchecks.io, ...). When set, a daemon thread GETs it on an interval. Must be `http(s)`; redirects are not followed and the URL is treated as a secret (never logged in full). Empty = disabled. |
+| `VAULT_MCP_HEARTBEAT_INTERVAL` | No | `60` | Seconds between heartbeat pings. Must be a positive integer; a bad value fails closed at startup. Only used when `VAULT_MCP_HEARTBEAT_URL` is set. |
 
 Generate secrets with: `python -c "import secrets; print(secrets.token_hex(32))"`
 

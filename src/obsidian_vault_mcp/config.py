@@ -90,6 +90,52 @@ def advertised_base_url(request_base_url: str) -> str:
     """
     return (VAULT_MCP_PUBLIC_URL or request_base_url).rstrip("/")
 
+# Optional liveness heartbeat. When VAULT_MCP_HEARTBEAT_URL is set, the server GETs
+# it every VAULT_MCP_HEARTBEAT_INTERVAL seconds from a daemon thread, for push-style
+# uptime monitors (Uptime Kuma, Healthchecks.io, Cronitor, ...). Empty = disabled
+# (the default); failures are logged, never fatal. The interval is kept as a raw
+# string and parsed in validate_heartbeat() so a bad value fails closed at startup
+# rather than crashing the whole server at import time.
+VAULT_MCP_HEARTBEAT_URL = os.environ.get("VAULT_MCP_HEARTBEAT_URL", "").strip()
+VAULT_MCP_HEARTBEAT_INTERVAL = os.environ.get("VAULT_MCP_HEARTBEAT_INTERVAL", "60").strip()
+
+
+def validate_heartbeat() -> int | None:
+    """Validate the heartbeat config; return the interval (seconds) when enabled.
+
+    Returns None when the heartbeat is disabled (no URL). Raises ValueError (so
+    server.main() can exit non-zero and fail CLOSED) when the URL scheme is not
+    http(s) or the interval is not a positive integer -- a typo must not boot a
+    server that silently never pings, or that tight-loops on interval 0.
+    """
+    url = VAULT_MCP_HEARTBEAT_URL
+    if not url:
+        return None
+
+    from urllib.parse import urlsplit
+
+    # The error messages below deliberately never echo the raw values: the URL is a
+    # capability URL (secret in the path), and a misconfigured operator might swap the
+    # URL/interval env vars -- and server.main() logs whatever this raises.
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port  # raises ValueError on a malformed port
+    except ValueError:
+        raise ValueError("VAULT_MCP_HEARTBEAT_URL has a malformed port")
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("VAULT_MCP_HEARTBEAT_URL must be an http(s) URL with a host")
+    del port  # only accessed to trigger the malformed-port check
+
+    try:
+        interval = int(VAULT_MCP_HEARTBEAT_INTERVAL)
+    except ValueError:
+        raise ValueError(
+            "VAULT_MCP_HEARTBEAT_INTERVAL must be an integer number of seconds"
+        )
+    if interval <= 0:
+        raise ValueError("VAULT_MCP_HEARTBEAT_INTERVAL must be a positive integer")
+    return interval
+
 # Safety limits
 MAX_CONTENT_SIZE = 1_000_000  # 1MB max write size
 MAX_BATCH_SIZE = 20           # Max files per batch operation
