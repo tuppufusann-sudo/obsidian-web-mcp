@@ -131,8 +131,41 @@ All configuration is via environment variables:
 | `VAULT_DAILY_NOTES_TEMPLATE` | No | (none) | `strftime` template prepended when a daily note is first created |
 | `VAULT_MCP_HEARTBEAT_URL` | No | (none) | Optional push URL for an uptime monitor (Uptime Kuma, Healthchecks.io, ...). When set, a daemon thread GETs it on an interval. Must be `http(s)`; redirects are not followed and the URL is treated as a secret (never logged in full). Empty = disabled. |
 | `VAULT_MCP_HEARTBEAT_INTERVAL` | No | `60` | Seconds between heartbeat pings. Must be a positive integer; a bad value fails closed at startup. Only used when `VAULT_MCP_HEARTBEAT_URL` is set. |
+| `VAULT_AUDIT_LOG_PATH` | No | (none) | Append-only JSONL audit log of vault mutations. When set, every mutation appends one record; empty disables auditing. The raw bearer token is never written -- only its SHA-256 hash. Must resolve **outside** the vault and be writable; otherwise the server **fails closed** at startup. See [Audit logging](#audit-logging). |
+| `VAULT_AUDIT_LOG_INCLUDE_READS` | No | `false` | Also record read/search operations (`1`/`true`/`yes`/`on`). Off by default; mutations are always logged once the audit log is enabled. |
 
 Generate secrets with: `python -c "import secrets; print(secrets.token_hex(32))"`
+
+## Audit logging
+
+Set `VAULT_AUDIT_LOG_PATH` to a file path to record every vault mutation as an append-only
+JSON line. Auditing is **off by default**; with no path set there is no overhead. Reads and
+searches are logged too when `VAULT_AUDIT_LOG_INCLUDE_READS` is on (off by default, since
+reads are high-volume).
+
+Each record carries: `timestamp` (UTC), `token_id_hash` (SHA-256 of the bearer token -- the
+raw token is never written), `client_id` (a best-effort User-Agent hint), `operation`,
+`target_path`, `size_before`/`size_after`, `checksum_before`/`checksum_after` (SHA-256),
+`request_id`, `operation_status`, and `error`. Example line:
+
+```json
+{"checksum_after":"9f86d0…","checksum_before":null,"client_id":"claude","error":null,"operation":"vault_write","operation_status":"success","request_id":"a1b2…","size_after":42,"size_before":null,"target_path":"notes/today.md","timestamp":"2026-06-14T18:30:00+00:00","token_id_hash":"5e88…"}
+```
+
+**Put the log outside the vault.** `VAULT_AUDIT_LOG_PATH` must resolve outside `VAULT_PATH`.
+A log inside the vault would be just another file the vault tools can reach, so an
+authenticated caller could overwrite it (`vault_write`) or move it (`vault_delete`) and
+defeat the append-only premise. The server validates this at startup and **refuses to start
+(fail-closed)** if the path is not writable or resolves inside the vault.
+
+**Threat model — the log is best-effort at runtime, not tamper-evident.** A write failure
+at runtime is logged to the server log but never alters the tool result (the audit trail
+must not be able to break a write), so a record can be dropped silently; the server log is
+the only signal. Batch mutations emit one record per file with that file's own status, so a
+partial failure is never recorded as a whole-batch success. The unauthenticated `GET /health`
+endpoint reports only `{"status": "ok", "audit": {"enabled": <bool>}}` — it deliberately does
+not expose the log path or write counters (which would leak host filesystem layout and a
+vault-activity side-channel to anonymous callers over the tunnel).
 
 ## Connecting to Claude
 
