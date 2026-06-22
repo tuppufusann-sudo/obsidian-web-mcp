@@ -5,6 +5,8 @@ import logging
 
 import frontmatter
 
+from .. import frontmatter_io
+from ..frontmatter_io import YAMLError
 from ..serialization import dumps
 from ..vault import resolve_vault_path, read_file, write_file_atomic
 from ..write_events import fire_write
@@ -20,18 +22,27 @@ def vault_write(path: str, content: str, create_dirs: bool = True, merge_frontma
         if merge_frontmatter:
             try:
                 existing_content, _ = read_file(path)
-                existing_post = frontmatter.loads(existing_content)
-                new_post = frontmatter.loads(content)
+                existing_meta, _ = frontmatter_io.loads(existing_content)
+                new_meta, new_body = frontmatter_io.loads(content)
 
-                merged_meta = dict(existing_post.metadata)
-                merged_meta.update(new_post.metadata)
+                # Mutate existing in place: untouched keys keep their original
+                # formatting (quote style, comments, key order); new keys are
+                # appended. ruamel round-trip avoids PyYAML's normalisation.
+                for key, value in new_meta.items():
+                    existing_meta[key] = value
 
-                new_post.metadata = merged_meta
-                content = frontmatter.dumps(new_post)
+                content = frontmatter_io.dumps(existing_meta, new_body)
             except FileNotFoundError:
                 pass
-            except Exception as e:
-                logger.warning(f"Frontmatter merge failed for {path}, writing as-is: {e}")
+            except YAMLError as e:
+                # Malformed YAML in either side: abort rather than silently
+                # dropping the existing frontmatter or nesting a stray --- block.
+                # A correctable error beats a lossy write for an agent caller.
+                return dumps({
+                    "error": f"Frontmatter merge aborted: malformed YAML frontmatter ({e})",
+                    "path": path,
+                    "created": False,
+                })
 
         is_new, size = write_file_atomic(path, content, create_dirs=create_dirs)
 
