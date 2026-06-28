@@ -10,7 +10,7 @@ WORKDIR /app
 COPY . /app
 
 # 依存関係をインストール
-RUN uv sync --frozen
+RUN uv sync
 
 # vault のマウントポイント（コンテナ内）
 VOLUME /vault
